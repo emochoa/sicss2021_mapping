@@ -1,0 +1,142 @@
+---
+title: "Crime Mapping"
+author: "Erin M. Ochoa"
+date: "06/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(sf)
+library(mapview)
+library(lubridate)
+library(tidyverse)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+# Load these libraries:
+# 
+# library(sf)
+# library(mapview)
+# library(lubridate)
+# library(tidyverse)
+
+# Use classical leaflet/htmlwidgets rendering.
+mapviewOptions(fgb = FALSE)
+```
+
+
+```{r read_chi_tracts, echo=TRUE}
+# https://data.cityofchicago.org/Facilities-Geographic-Boundaries/Boundaries-Census-Tracts-2010/5jrd-6zik
+# 
+# Read in the Chicago 2010 Census tracts.
+# Rename the ID column.
+# Select only the GEOID column.
+# Preview a map.
+(geo.chi <- st_read('chicago_tracts_2010.geojson') %>% 
+            rename(GEOID = geoid10) %>% 
+            select(GEOID)) %>% mapview(legend = F, col.regions = 'deeppink')
+```
+
+```{r}
+# https://data.cityofchicago.org/Public-Safety/Crimes-2001-to-Present/ijzp-q8t2/data
+# 
+# Read in Chicago violent crimes (2020):
+#   homicide, robbery, criminal sexual assault, battery, & assault.
+# Select necessary columns.
+# Change Date from mdy_hms string to ymd date.
+# Shorten the CSA description to an abbreviation.
+# Drop observations with missing coordinates.
+# Convert to spatial points geometry.
+# Set CRS.
+geo.crimes <- read.csv('ViolentCrime2020.csv') %>% 
+              select(ID, Date, Primary.Type, Arrest,
+                     Domestic, Longitude, Latitude) %>% 
+              mutate(Date = mdy_hms(Date) %>% date(),
+                     Primary.Type = ifelse(Primary.Type == 'CRIMINAL SEXUAL ASSAULT',
+                                           'CSA',
+                                           Primary.Type)) %>% 
+              filter(!is.na(Longitude)) %>% 
+              st_as_sf(coords = c('Longitude', 'Latitude')) %>%
+              st_set_crs(4326)
+
+# Count by crime type.
+geo.crimes %>% as.data.frame() %>% group_by(Primary.Type) %>% tally(n = 'Count')
+
+# Glance at a map for August.
+geo.crimes %>% filter(month(Date) == 8) %>%
+  mapview(cex = .5, lwd = 0,  legend = F) + 
+  mapview(geo.chi, alpha.regions = 0, legend = F)
+```
+
+```{r read_population}
+# Read in Cook County population data; take a glimpse.
+(df.cook <- read.csv('cook_census.csv')) %>% head()
+```
+
+```{r merge_chi_pop}
+# Merge the population data (county) into Chicago tracts. This will drop the
+# data for the tracts outside the city.
+# Glance at a polygon map (rename the layer; increase the opacity; add heavier borders).
+(geo.chi.acs <- geo.chi %>% merge(df.cook)) %>%
+  mapview(zcol = 'Population', layer.name = 'Population', alpha.regions = .65, lwd = .85)
+```
+
+```{r spatial_join, message=FALSE, warning=FALSE}
+# Use a spatial join to find out which Census tract each point is in.
+geo.joined <- st_join(geo.crimes, geo.chi.acs, st_within)
+
+# Tally up violent crimes by type.
+# Pivot wider to get one observation per tract and one column for counts of each
+# crime type. Fill in NA observations (where there were no such crimes) with zeros.
+(df.ct.by_type <- geo.joined %>%
+                  as.data.frame() %>%
+                  group_by(GEOID, Primary.Type) %>%
+                  tally(n = 'Ct') %>% 
+                  pivot_wider(GEOID, names_from = Primary.Type, names_prefix = 'Ct.',
+                              values_from = Ct, values_fill = 0)) %>% head()
+
+# Tally up all types of violent crimes and merge in the by-type counts.
+(df.ct.all <- geo.joined %>%
+              as.data.frame() %>%
+              group_by(GEOID) %>%
+              tally(n = 'Ct.ALL') %>% 
+              merge(df.ct.by_type)) %>% head()
+
+# Merge counts back into geometry.
+# Drop observations with empty geometry.
+# Look at a count map.
+(geo.counts <- geo.chi.acs %>%
+               merge(df.ct.all, all = T) %>% 
+               filter(!st_is_empty(.))) %>%
+  mapview(zcol = 'Ct.ALL', lwd = .75, layer.name = 'All Violent Crimes (Count)')
+```
+
+```{r geo_rates}
+# Make a dataframe of crime rates for each type of crime.
+# First, drop observations with a population of zero (can't do a rate with division by 0).
+# Next, mutate across count columns and transform to rate per 100,000 residents.
+# Rename the columns appropriately (Rt. for rate instead of Ct. for count).
+# Build a map.
+(geo.rates <- geo.counts %>%
+              filter(Population > 0) %>% 
+              mutate(across(starts_with('Ct.'), ~ (. / Population * 100000))) %>%
+              rename_with(.fn = ~ str_replace(., 'Ct.', 'Rt.'),
+                          .cols = starts_with('Ct.'))) %>%
+  mapview(zcol = 'Rt.ALL', layer.name = 'All Violent Crimes per 100,000', lwd = 1)
+```
+
+```{r augment_write}
+# Add the crime counts and rates to the same dataframe:
+# First, convert geo.rates to a dataframe.
+# Then drop the geometry column.
+# Finally, merge it *from the right* into geo.counts. Keep all rows on both sides. BUT
+# then drop any observations with missing geometry.
+geo.crime_measures <- geo.rates %>%
+                      as.data.frame() %>%
+                      select(-geometry) %>%
+                      merge(geo.counts, ., all = T)
+
+# Write the dataset, overwriting any existing file of the same name.
+st_write(geo.crime_measures, 'chicago_violent-crime-2020.geojson', delete_dsn = T)
+```

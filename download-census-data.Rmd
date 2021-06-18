@@ -1,0 +1,43 @@
+---
+title: "Download Census Data"
+author: "Erin M. Ochoa"
+date: "06/17/2021"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+library(tidyverse)
+knitr::opts_chunk$set(include = TRUE)
+```
+
+```{r read_key}
+# Read Census API key and use it for this session.
+# NOTE: This reads in the Census API key stored in my home directory; the key is
+#       not provided. You can sign up for a key through the Census:
+#         https://www.census.gov/data/developers.html
+#         https://api.census.gov/data/key_signup.html
+jsonlite::read_json('~/census_api_key.json')$key %>%
+  tidycensus::census_api_key()
+```
+
+
+```{r download_cook_acs}
+# Download tract-level population data for Cook County from the 2019 ACS 5-year.
+# Drop MOE column.
+# Rename the population column.
+(df.cook <- tidycensus::get_acs(geography = 'tract',
+                                variables = 'B01003_001',
+                                year = 2019,
+                                output = 'wide',
+                                county = '031',
+                                state = 'IL', 
+                                survey = 'acs5',
+                                geometry = F,
+                                show_call = T) %>% 
+                        select(!ends_with('M')) %>% 
+                        rename(Population = B01003_001E)) %>% head()
+```
+
+```{r write}
+write.csv(df.cook, 'cook_census.csv', row.names = F)
+```
